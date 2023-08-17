@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import functools
+import platform
 import re
 import shlex
 import subprocess
@@ -56,12 +57,13 @@ def extract_log_installed_rpms(file):
         if re.match(r'DEBUG util.py:\d+:\s+Complete!', line):
             in_installed = False
             continue
-        if not (m := re.match(r'DEBUG util.py:\d+:\s+([-a-zA-Z0-9:._^~+]+)$', line)):
+        if not (m := re.match(r'DEBUG util.py:\d+:(\s+([-a-zA-Z0-9:._^~+]+))+$', line)):
             print(f'Failed to match: {line!r}')
-            # error?
+            raise ValueError
 
-        rpm = RPM.from_string(m.group(1))
-        yield rpm
+        for s in m.group(1).split():
+            rpm = RPM.from_string(s)
+            yield rpm
 
 @dataclasses.dataclass(frozen=True)
 class RPM:
@@ -70,6 +72,7 @@ class RPM:
     release: str
     arch: str = None
     epoch: int = None
+    build_id: int = None
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -105,7 +108,7 @@ class RPM:
                 (f'.{self.arch}' if self.arch else ''))
 
     @functools.cached_property
-    def build(self):
+    def without_arch(self):
         # like self, but with arch stripped
         if not self.arch:
             return self
@@ -113,15 +116,6 @@ class RPM:
                               version=self.version,
                               release=self.release,
                               epoch=self.epoch)
-
-    @functools.cached_property
-    def srpm(self):
-        # like self, but srpm
-        return self.__class__(name=self.name,
-                              version=self.version,
-                              release=self.release,
-                              arch='src',
-                              epoch=self.epoch)                              
 
 @functools.lru_cache(maxsize=None)
 def rpm_info(rpm):
@@ -137,15 +131,19 @@ def rpm_info(rpm):
 @functools.lru_cache(maxsize=None)
 def build_info(ident):
     if not isinstance(ident, int):
-        ident = rpm.koji_id
+        ident = ident.koji_id
     return SESSION.getBuild(ident, strict=True)
     
 def koji_rpm_url(package):
     # 'valgrind-devel-1:3.21.0-8.fc39.x86_64'
     # https://kojipkgs.fedoraproject.org//packages/valgrind/3.21.0/8.fc39/x86_64/valgrind-3.21.0-8.fc39.x86_64.rpm
     # https://kojipkgs.fedoraproject.org//packages/valgrind/3.21.0/8.fc39/src/valgrind-3.21.0-8.fc39.src.rpm
-    rpm = rpm_info(package)
-    build = build_info(rpm['build_id'])
+    if not (build_id := package.build_id):
+        rpm = rpm_info(package)
+        build_id = rpm['build_id']
+
+    build = build_info(build_id)
+
     return '/'.join((KOJI_URL,
                      'packages',
                      build['name'],
@@ -162,10 +160,10 @@ def koji_log_url(package, name, arch):
             return '/'.join((KOJI_URL, entry['path']))
 
 def get_local_package_filename(package, fname, url_generator, *details):
-    path = CACHE_DIR / 'rpms' / package.build.canonical / fname
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / 'rpms' / package.without_arch.canonical / fname
 
     if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
         url = url_generator(package, *details)
         print(f'Downloading {url} to {path}')
         req = requests.get(url, allow_redirects=True)
@@ -178,7 +176,27 @@ def get_koji_log(package, name, arch):
     assert name.endswith('.log')
     return get_local_package_filename(package, f'{arch}-{name}', koji_log_url, name, arch)
 
-def get_installed_rpms(package, arch):
+def get_buildroot_listing(package, arch):
+    build = build_info(package)
+    list = SESSION.getBuildrootListing(build['build_id'])
+    # [ {'arch': 'x86_64',
+    #    'build_id': 553384,
+    #    'epoch': None,
+    #    'external_repo_id': 0,
+    #    'external_repo_name': 'INTERNAL',
+    #    'is_update': False,
+    #    'name': 'binutils',
+    #    'release': '18.fc22',
+    #    'rpm_id': 5360316,
+    #    'version': '2.24'},
+    #    ...
+    #  ]
+
+    return [RPM(name=e['name'], version=e['version'], release=e['release'], arch=e['arch'],
+                epoch=e['epoch'], build_id=e['build_id'])
+            for e in list]
+
+def get_installed_rpms_from_log(package, arch):
     log = get_koji_log(package, 'root.log', arch)
     return extract_log_installed_rpms(log)
 
@@ -202,7 +220,7 @@ main_config = '''\
         syslog_device=
         install_weak_deps=0
         metadata_expire=0
-        best=1
+        best=0
         module_platform_id=platform:f{{ releasever }}
         protected_packages=
         user_agent={{ user_agent }}
@@ -216,6 +234,9 @@ main_config = '''\
         '''
 
 def mock_config(arch, package_dir):
+    if arch == 'noarch':
+        arch = platform.machine()
+
     return textwrap.dedent(
         f'''\
         include('fedora-rawhide-{arch}.cfg')
@@ -259,10 +280,12 @@ def comps_config(rpms):
         ''')
         
 def setup_buildroot(package, arch):
-    build_rpms = get_installed_rpms(package, arch)
+    # build_rpms = get_buildroot_listing(package, arch)
+    build_rpms = get_installed_rpms_from_log(package, arch)
+
     rpms = get_local_installed_rpms(build_rpms)
 
-    build_dir = CACHE_DIR / 'build' / package.build.canonical
+    build_dir = CACHE_DIR / 'build' / package.without_arch.canonical
 
     repo_dir = build_dir / 'repo'
     repo_dir.mkdir(parents=True, exist_ok=True)
@@ -293,15 +316,51 @@ def setup_buildroot(package, arch):
 
     return configfile
 
-def build_package(package, arch):
-    srpm = get_local_rpm_filename(package.srpm)
-    configfile = setup_buildroot(package, arch)
-    uniqueext = package.build.canonical
+def extract_header_field(filename, name):
+    cmd = [
+        'rpm',
+        '-qp',
+        '--qf', f'%{{{name}}}',
+        filename,
+    ]
+    return subprocess.check_output(cmd, text=True)
+
+def extract_config(filename):
+    config = {name: extract_header_field(filename, name)
+              for name in ('BUILDHOST',
+                           'BUILDTIME',
+                           'BUGURL',
+                           'DISTRIBUTION',
+                           'PACKAGER',
+                           'VENDOR',
+                           )}
+    return config
+
+def extract_srpm_name(rpm):
+    field = extract_header_field(rpm, 'SOURCERPM')
+    assert field.endswith('.src.rpm')
+    return RPM.from_string(field[:-4])
+
+def build_package(package, arch, *mock_opts):
+    rpm = get_local_rpm_filename(package)
+    config = extract_config(rpm)
+    _srpm = extract_srpm_name(rpm)
+    srpm = get_local_rpm_filename(_srpm)
+
+    configfile = setup_buildroot(_srpm, arch)
+    uniqueext = package.without_arch.canonical
 
     cmdline = [
         'mock',
         '-r', configfile,
         f'--uniqueext={uniqueext}',
+        f"--define=_buildhost {config['BUILDHOST']}",
+        f"--define=distribution {config['DISTRIBUTION']}",
+        f"--define=packager {config['PACKAGER']}",
+        f"--define=vendor {config['VENDOR']}",
+        f"--define=bugurl {config['BUGURL']}",
+        f"--without=tests",
+        *mock_opts,
         srpm,
     ]
 
