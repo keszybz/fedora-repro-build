@@ -1,5 +1,7 @@
 # https://kojipkgs.fedoraproject.org//packages/systemd/254/1.fc39/data/logs/x86_64/root.log
 
+# pylint: disable=missing-docstring,invalid-name
+
 import argparse
 import dataclasses
 import functools
@@ -9,8 +11,6 @@ import shlex
 import subprocess
 import sys
 import textwrap
-import tempfile
-import types
 from pathlib import Path
 
 import requests
@@ -26,6 +26,7 @@ def listify(func):
 
 KOJI, SESSION = None, None
 def init_koji_session(opts):
+    # pylint: disable=global-statement
     global KOJI, SESSION
     if not SESSION:
         KOJI = koji.get_profile_module(opts.koji_profile)
@@ -97,6 +98,7 @@ class RPM:
 
     @functools.cached_property
     def koji_id(self):
+        # pylint: disable=use-dict-literal
         dd = dict(name=self.name, version=self.version, release=self.release)
         if self.arch:
             dd['arch'] = self.arch
@@ -133,7 +135,7 @@ def build_info(ident):
     if not isinstance(ident, int):
         ident = ident.koji_id
     return SESSION.getBuild(ident, strict=True)
-    
+
 def koji_rpm_url(package):
     # 'valgrind-devel-1:3.21.0-8.fc39.x86_64'
     # https://kojipkgs.fedoraproject.org//packages/valgrind/3.21.0/8.fc39/x86_64/valgrind-3.21.0-8.fc39.x86_64.rpm
@@ -155,9 +157,12 @@ def koji_rpm_url(package):
 def koji_log_url(package, name, arch):
     build = build_info(package)
     logs = SESSION.getBuildLogs(build['build_id'])
+    # pylint: disable=useless-else-on-loop
     for entry in logs:
         if entry['name'] == name and entry['dir'] == arch:
             return '/'.join((KOJI_URL, entry['path']))
+    else:
+        raise ValueError(f'{package}: build log {name}/{arch} not found')
 
 def get_local_package_filename(package, fname, url_generator, *details):
     path = CACHE_DIR / 'rpms' / package.without_arch.canonical / fname
@@ -166,7 +171,7 @@ def get_local_package_filename(package, fname, url_generator, *details):
         path.parent.mkdir(parents=True, exist_ok=True)
         url = url_generator(package, *details)
         print(f'Downloading {url} to {path}')
-        req = requests.get(url, allow_redirects=True)
+        req = requests.get(url, allow_redirects=True, timeout=60)
         req.raise_for_status()
         path.write_bytes(req.content)
 
@@ -178,7 +183,7 @@ def get_koji_log(package, name, arch):
 
 def get_buildroot_listing(package, arch):
     build = build_info(package)
-    list = SESSION.getBuildrootListing(build['build_id'])
+    lst = SESSION.getBuildrootListing(build['build_id'])
     # [ {'arch': 'x86_64',
     #    'build_id': 553384,
     #    'epoch': None,
@@ -194,7 +199,7 @@ def get_buildroot_listing(package, arch):
 
     return [RPM(name=e['name'], version=e['version'], release=e['release'], arch=e['arch'],
                 epoch=e['epoch'], build_id=e['build_id'])
-            for e in list]
+            for e in lst]
 
 def get_installed_rpms_from_log(package, arch):
     log = get_koji_log(package, 'root.log', arch)
@@ -278,7 +283,7 @@ def comps_config(rpms):
           </group>
         </comps>
         ''')
-        
+
 def setup_buildroot(package, arch):
     # build_rpms = get_buildroot_listing(package, arch)
     build_rpms = get_installed_rpms_from_log(package, arch)
@@ -353,13 +358,13 @@ def build_package(package, arch, *mock_opts):
     cmdline = [
         'mock',
         '-r', configfile,
-        f'--uniqueext={uniqueext}',
+        f"--uniqueext={uniqueext}",
         f"--define=_buildhost {config['BUILDHOST']}",
         f"--define=distribution {config['DISTRIBUTION']}",
         f"--define=packager {config['PACKAGER']}",
         f"--define=vendor {config['VENDOR']}",
         f"--define=bugurl {config['BUGURL']}",
-        f"--without=tests",
+        '--without=tests',
         *mock_opts,
         srpm,
     ]
@@ -367,9 +372,12 @@ def build_package(package, arch, *mock_opts):
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmdline)}")
     subprocess.check_call(cmdline)
 
-if __name__ == '__main__':
+def main(argv):
     opts = do_opts()
     init_koji_session(opts)
 
-    package = RPM.from_string(sys.argv[1])
+    package = RPM.from_string(argv[1])
     build_package(package, package.arch)
+
+if __name__ == '__main__':
+    main(sys.argv)
