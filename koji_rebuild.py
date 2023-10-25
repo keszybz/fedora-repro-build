@@ -6,8 +6,10 @@ import argparse
 import dataclasses
 import functools
 import platform
+import pprint
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -33,7 +35,11 @@ def const(func):
         return m
     return functools.update_wrapper(wrapper, func)
 
-KOJI, SESSION = None, None
+try:
+    KOJI, SESSION
+except NameError:
+    KOJI, SESSION = None, None
+
 def init_koji_session(opts):
     # pylint: disable=global-statement
     global KOJI, SESSION
@@ -65,8 +71,6 @@ def extract_log_installed_rpms(file):
 
     in_installed = False
     for line in file:
-        # if 'Installed' in line:
-        #    breakpoint()
         line = line.rstrip()
         if re.match(r'DEBUG util.py:\d+:\s+Installed:', line):
             in_installed = True
@@ -92,13 +96,12 @@ class RPM:
     epoch: int = None
     arch: str = None
 
-    package: object = None
+    package: 'RPM' = None
     build_id: int = None
     rpms: dict = dataclasses.field(default_factory=list)
-    srpm: object = None
+    srpm: 'RPM' = None
 
     @classmethod
-    @functools.lru_cache(maxsize=None)
     def from_string(cls, s, epoch=None):
         # 'valgrind-1:3.21.0-8.fc39.x86_64'
         parts = s.split('-')
@@ -141,27 +144,27 @@ class RPM:
         return (f'{self.name}-{self.version}-{self.release}' +
                 (f'.{self.arch}' if self.arch else ''))
 
-    @functools.cached_property
-    def without_arch(self):
-        # like self, but with arch stripped
-        if not self.arch:
+    def with_arch(self, arch):
+        if self.arch == arch:
             return self
         return self.__class__(name=self.name,
                               version=self.version,
                               release=self.release,
-                              epoch=self.epoch)
+                              epoch=self.epoch,
+                              arch=arch)
+
+    @functools.cached_property
+    def without_arch(self):
+        # like self, but with arch stripped
+        return self.with_arch(None)
+
+    def build_dir(self):
+        assert not self.package
+        return CACHE_DIR / 'build' / self.canonical
 
     def rpm_info(self):
         assert self.arch
-        # It seems koji has no notion of epoch :(
-        # Let's hope nobody ever builds the same n-v-r with different e
-
-        # https://koji.fedoraproject.org/koji/api says:
-        # - a map containing 'name', 'version', 'release', and 'arch'
-        #   (and optionally 'location')
-        # I have no idea what 'location' is.
-        print(f'call: getRPM({self.koji_id}')
-        return SESSION.getRPM(self.koji_id, strict=True)
+        return koji_get_rpm(self)
 
     def build_info(self):
         return koji_build_info(self)
@@ -172,17 +175,24 @@ class RPM:
         assert rpm.package is None
 
         if rpm.arch == 'src':
-            assert self.srpm is None
+            # assert self.srpm is None
+            # In noarch builds, srpm is created and listed in build outputs twice.
             self.srpm = rpm
         else:
             self.rpms += [rpm]
         rpm.package = self
+
+        if rpm.build_id and build_id and rpm.build_id != build_id:
+            raise ValueError(f'Differing build ids: {rpm.build_id=} {build_id=}')
+        rpm.build_id = build_id
+
         return rpm
 
     def add_output_from_string(self, name, build_id=None):
         rpm = self.from_string(name)
         assert rpm.arch
-        return self.add_output(rpm)
+        print(rpm)
+        return self.add_output(rpm, build_id=build_id)
 
     def some_rpm(self):
         assert self.package is None
@@ -219,7 +229,10 @@ class RPM:
                          self.arch,
                          f"{self.canonical}.rpm"))
 
-_BUILD_INFO_CACHE = {}
+try:
+    _BUILD_INFO_CACHE  # pylint: disable=used-before-assignment
+except NameError:
+    _BUILD_INFO_CACHE = {}
 
 def koji_build_info(ident):
     if isinstance(ident, int):
@@ -228,11 +241,55 @@ def koji_build_info(ident):
         key = ident.canonical
         ident = ident.koji_id
     if not (binfo := _BUILD_INFO_CACHE.get(key, None)):
-        print(f'call: getBuild({ident}')
+        print(f'call: getBuild({ident})')
         binfo = SESSION.getBuild(ident, strict=True)
         _BUILD_INFO_CACHE[binfo['id']] = _BUILD_INFO_CACHE[binfo['nvr']] = binfo
     return binfo
     # XXX: nvr vs. nevr
+
+try:
+    _TASK_CHILDREN_CACHE  # pylint: disable=used-before-assignment
+except NameError:
+    _TASK_CHILDREN_CACHE = {}
+
+def koji_get_task_children(task_id):
+    if (tasks := _TASK_CHILDREN_CACHE.get(task_id, None)) is None:
+        print(f"call: getTaskChildren({task_id})")
+        tasks = SESSION.getTaskChildren(task_id)
+        _TASK_CHILDREN_CACHE[task_id] = tasks
+    return tasks
+
+try:
+    _TASK_OUTPUT_CACHE  # pylint: disable=used-before-assignment
+except NameError:
+    _TASK_OUTPUT_CACHE = {}
+
+def koji_list_task_output(task_id):
+    if (output := _TASK_OUTPUT_CACHE.get(task_id, None)) is None:
+        print(f"call: listTaskOutput({task_id})")
+        output = SESSION.listTaskOutput(task_id)
+        _TASK_OUTPUT_CACHE[task_id] = output
+    return output
+
+try:
+    _RPM_INFO_CACHE  # pylint: disable=used-before-assignment
+except NameError:
+    _RPM_INFO_CACHE = {}
+
+def koji_get_rpm(rpm):
+    # It seems koji has no notion of epoch :(
+    # Let's hope nobody ever builds the same n-v-r with different e
+
+    # https://koji.fedoraproject.org/koji/api says:
+    # - a map containing 'name', 'version', 'release', and 'arch'
+    #   (and optionally 'location')
+    # I have no idea what 'location' is.
+    if (rinfo := _RPM_INFO_CACHE.get(rpm.canonical, None)) is None:
+        print(f'call: getRPM({rpm.koji_id}')
+        rinfo = SESSION.getRPM(rpm.koji_id, strict=True)
+        _RPM_INFO_CACHE[rpm.canonical] = rinfo
+    return rinfo
+
 
 def koji_log_url(package, name, arch):
     build = package.build_info()
@@ -244,6 +301,7 @@ def koji_log_url(package, name, arch):
         if entry['name'] == name and entry['dir'] == arch:
             return '/'.join((KOJI_URL, entry['path']))
     else:
+        print(logs)
         raise ValueError(f'{package}: build log {name}/{arch} not found')
 
 def get_local_package_filename(package, fname, url_generator, *details):
@@ -263,11 +321,9 @@ def get_koji_log(package, name, arch):
     assert name.endswith('.log')
     return get_local_package_filename(package, f'{arch}-{name}', koji_log_url, package, name, arch)
 
-def get_buildroot_listing(package, arch):
-    build = package.build_info()
-    bid = build['build_id']
-    print(f'call: getBuildrootListing({bid})')
-    lst = SESSION.getBuildrootListing(bid)
+def get_buildroot_listing(buildroot_id):
+    print(f'call: getBuildrootListing({buildroot_id})')
+    lst = SESSION.getBuildrootListing(buildroot_id)
     # [ {'arch': 'x86_64',
     #    'build_id': 553384,
     #    'epoch': None,
@@ -320,7 +376,8 @@ main_config = '''\
         '''
 
 def mock_config(arch, package_dir):
-    if arch == 'noarch':
+    assert arch != 'src'
+    if arch in {'noarch', None}:
         arch = platform.machine()
 
     return textwrap.dedent(
@@ -365,15 +422,37 @@ def comps_config(rpms):
         </comps>
         ''')
 
-def setup_buildroot(package, arch):
-    # build_rpms = get_buildroot_listing(package, arch)
-    build_rpms = get_installed_rpms_from_log(package, arch)
+@listify
+def override_rpm_architecture(buildroot_arch, rpms):
+    # noarch rpms are built on a "random" architecture. If the
+    # buildroot arch doesn't match our own, let's override the arch to install
+    # rpms that make we can run locally. There is no gurantee that the same
+    # set of rpms is available on every arch. But noarch packages should not
+    # depend on the build architecture. It'd be a bug if that were the case.
+    our_arch = platform.machine()  # XXX: this doesn't handle i386/i686 correctly
+    if buildroot_arch == our_arch:
+        yield from rpms
+    else:
+        print(f"Overriding build arch of rpms from {buildroot_arch} to {our_arch}")
+
+        for rpm in rpms:
+            if rpm.arch not in ('noarch', our_arch):
+                yield rpm.with_arch(our_arch)
+            else:
+                yield rpm
+
+def setup_buildroot(package, buildroot_info):
+    # XXX: buildroot_info['arch'] might be a foreign arch for a noarch build
+
+    # build_rpms = get_installed_rpms_from_log(package, arch)
+
+    build_rpms = get_buildroot_listing(buildroot_info['id'])
+
+    build_rpms = override_rpm_architecture(buildroot_info['arch'], build_rpms)
 
     rpms = get_local_rpms(build_rpms)
 
-    build_dir = CACHE_DIR / 'build' / package.without_arch.canonical
-
-    repo_dir = build_dir / 'repo'
+    repo_dir = package.build_dir() / 'repo'
     repo_dir.mkdir(parents=True, exist_ok=True)
     for rpm in rpms:
         # Is there a way to make this less horrible in python?
@@ -386,18 +465,18 @@ def setup_buildroot(package, arch):
     compsfile = repo_dir / 'comps.xml'
     compsfile.write_text(comps)
 
-    cmdline = [
+    cmd = [
         'createrepo_c',
         '-v',
         '-g', 'comps.xml',
         repo_dir,
     ]
 
-    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmdline)}")
-    subprocess.check_call(cmdline)
+    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
+    subprocess.check_call(cmd)
 
-    config = mock_config(arch, repo_dir)
-    configfile = build_dir / 'mock.cfg'
+    config = mock_config(None, repo_dir)
+    configfile = package.build_dir() / 'mock.cfg'
     configfile.write_text(config)
 
     return configfile
@@ -427,66 +506,196 @@ def extract_srpm_name(rpm):
     assert field.endswith('.src.rpm')
     return RPM.from_string(field[:-4])
 
-def build_package(package, *mock_opts):
+def mock_uniqueext_arg(package):
+    return '--uniqueext=repro'
+    # return f'--uniqueext={package.canonical}'
+
+def build_package(package, mock_configfile, *mock_opts):
     rpm = package.some_rpm()   # we don't care which one is used
     rpm_file = rpm.local_filename()
     config = extract_config(rpm_file)
     srpm_file = package.srpm.local_filename()
 
-    configfile = setup_buildroot(package, rpm.arch)
-    uniqueext = package.canonical
-
-    cmdline = [
+    cmd = [
         'mock',
-        '-r', configfile,
-        f"--uniqueext={uniqueext}",
+        '-r', mock_configfile,
+        mock_uniqueext_arg(package),
         f"--define=_buildhost {config['BUILDHOST']}",
         f"--define=distribution {config['DISTRIBUTION']}",
         f"--define=packager {config['PACKAGER']}",
         f"--define=vendor {config['VENDOR']}",
         f"--define=bugurl {config['BUGURL']}",
         '--without=tests',
+        '--nocheck',
         *mock_opts,
         srpm_file,
     ]
 
-    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmdline)}")
-    subprocess.check_call(cmdline)
+    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
+    subprocess.check_call(cmd)
+
+def mock_collect_output(package, mock_configfile):
+    cmd = [
+        'mock',
+        '-r', mock_configfile,
+        mock_uniqueext_arg(package),
+        '--print-root-path',
+    ]
+
+    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
+    root = Path(subprocess.check_output(cmd, text=True).strip())
+    assert root.exists()
+
+    result = root / '../result'
+    assert result.exists()
+
+    outdir = package.build_dir() / 'rebuild'
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    outdir.mkdir()
+
+    outputs = []
+    for file in result.glob('*'):
+        print(f'Squirelling mock output {file.name}')
+        shutil.copyfile(file, outdir / file.name, follow_symlinks=False)
+        outputs += [outdir / file.name]
+
+    return outputs
+
+def compare_output(rpm1, rpm2):
+    # Let's first compare with rpmdiff. If rpmdiff is happy, the rpms
+    # are substantially the same: the contents and important metadata
+    # is the same.
+    #
+    # diffoscope will pretty much always find differences because of
+    # BUILDTIME and other metadata that we don't override in the
+    # rebuild. Let's do this comparison only if the first finds some
+    # differences.
+
+    cmd = ['rpmdiff', rpm1.local_filename(), rpm2]
+    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
+    c = subprocess.call(cmd)
+    if c == 0:
+        return
+
+    # TBD
+
+def compare_outputs(package, outputs):
+    srpm = None
+    rpms = []
+
+    for output in outputs:
+        if output.name.endswith('.src.rpm'):
+            if srpm is not None:
+                raise ValueError('Duplicate srpm')
+            srpm = output
+        elif output.name.endswith('.rpm'):
+            rpms += [output]
+
+    if not srpm:
+        raise ValueError('No srpm found')
+    if not rpms:
+        raise ValueError('No rpms found')
+
+    if len(rpms) != len(package.rpms):
+        raise ValueError(f'Mismatch in rpm count ({len(rpms)} != {len(package.rpms)})')
+
+    compare_output(package.srpm, srpm)
+
+    rpms_new = sorted(rpms)
+    rpms_old = sorted(package.rpms, key=lambda r: r.canonical)
+
+    for rpm_old, rpm_new in zip(rpms_old, rpms_new):
+        compare_output(rpm_old, rpm_new)
+
 
 def rebuild_package(package, *mock_opts, arch=None):
     arch_possibles = [arch] if arch else ['noarch', platform.machine()]
 
     build = package.build_info()
-
-    tasks = SESSION.getTaskChildren(build['task_id'])
-    for subtask in tasks:
-        # find task with the right arch
-        if (subtask['method'] == 'buildArch' and
-            subtask['arch'] in arch_possibles):
-            break
-    else:
-        raise ValueError(f"Cannot find buildArch task with arch={' or '.join(arch_possibles)}")
-
-    # tags = SESSION.listTags(build['build_id'])
+    tasks = koji_get_task_children(build['task_id'])
 
     # get a list of outputs:
+    # for a noarch build:
     # ['mock_output.log', 'root.log', …,
     #  'python3-referencing-0.30.2-1.fc40.noarch.rpm',
     #  'python-referencing-0.30.2-1.fc40.src.rpm']
-    outputs = SESSION.listTaskOutput(subtask['id'])
+    #
+    # for an archful build:
+    # ['mock_output.log', 'hw_info.log', 'state.log', 'build.log', 'root.log', 'checkout.log',
+    # 'systemd-254.1-2.fc40.src.rpm']
+    # ['mock_output.log', 'hw_info.log', 'state.log', 'build.log', 'root.log',
+    # 'systemd-debugsource-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-tests-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-tests-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-udev-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-libs-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-udev-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-networkd-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-pam-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-container-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-repart-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-resolved-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-tmpfiles-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-shutdown-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-networkd-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-libs-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-sysusers-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-container-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-pam-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-repart-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-resolved-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-devel-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-journal-remote-debuginfo-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-tmpfiles-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-shutdown-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-standalone-sysusers-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-journal-remote-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-boot-unsigned-254.1-2.fc40.x86_64.rpm',
+    # 'systemd-ukify-254.1-2.fc40.noarch.rpm',
+    # 'systemd-rpm-macros-254.1-2.fc40.noarch.rpm',
+    # 'systemd-oomd-defaults-254.1-2.fc40.noarch.rpm',
+    # 'noarch_rpmdiff.json']
 
-    have_rpm = False
-    for output in outputs:
-        if output.endswith('.rpm'):
-            rpm = package.add_output_from_string(output[:-4], build_id=subtask['id'])
-            if rpm.arch in arch_possibles:
-                have_rpm = True
-            if package.srpm and have_rpm:
-                break
-    else:
+    arch_task = None
+
+    for subtask in tasks:
+        # find task with the right arch
+        if (subtask['method'] == 'buildSRPMFromSCM' or
+            (subtask['method'] == 'buildArch' and
+             subtask['arch'] in arch_possibles)):
+
+            outputs = koji_list_task_output(subtask['id'])
+
+            for output in outputs:
+                if output.endswith('.rpm'):
+                    package.add_output_from_string(output[:-4], build_id=subtask['id'])
+
+            if subtask['method'] == 'buildArch':
+                arch_task = subtask
+
+    if not arch_task:
+        raise ValueError(f"Cannot find buildArch task with arch={' or '.join(arch_possibles)}")
+
+    # tags = SESSION.listTags(build['build_id'])
+    if not package.srpm or not package.rpms:
+        pprint.pprint(tasks)
         raise ValueError(f'srpm and rpm output not found in {outputs!r}')
 
-    return build_package(package)
+    buildroots = SESSION.listBuildroots(taskID=arch_task['id'])
+    # I have no idea how to distinguish different buildroots.
+    # If there's just one, there's no issue.
+    assert len(buildroots) == 1
+    buildroot_info = buildroots[0]
+
+    mock_configfile = setup_buildroot(package, buildroot_info)
+
+    build_package(package, mock_configfile, *mock_opts)
+
+    outputs = mock_collect_output(package, mock_configfile)
+    compare_outputs(package, outputs)
 
 
 def main(argv):
