@@ -48,11 +48,13 @@ def init_koji_session(opts):
         session_opts = KOJI.grab_session_options(KOJI.config)
         SESSION = KOJI.ClientSession(KOJI.config.server, session_opts)
 
-def do_opts():
+def do_opts(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--koji-profile', default='koji')
 
-    opts = parser.parse_args()
+    parser.add_argument('rpm')
+
+    opts = parser.parse_args(argv)
     return opts
 
 @functools.cache
@@ -699,14 +701,14 @@ def rebuild_package(package, *mock_opts, arch=None):
 
 
 def main(argv):
-    opts = do_opts()
+    opts = do_opts(argv)
     init_koji_session(opts)
 
-    package = RPM.from_string(argv[1])
+    package = RPM.from_string(opts.rpm)
     if package.arch:
         sys.exit('Sorry, specify build name, not rpm name')
 
     rebuild_package(package)
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main(sys.argv[1:])
