@@ -3,7 +3,9 @@
 # pylint: disable=missing-docstring,invalid-name,consider-using-with,unspecified-encoding
 
 import argparse
+import collections
 import dataclasses
+import json
 import functools
 import platform
 import pprint
@@ -13,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import typing
 from pathlib import Path
 
 import requests
@@ -36,7 +39,7 @@ def const(func):
     return functools.update_wrapper(wrapper, func)
 
 try:
-    KOJI, SESSION
+    KOJI, SESSION  # pylint: disable=used-before-assignment
 except NameError:
     KOJI, SESSION = None, None
 
@@ -166,10 +169,10 @@ class RPM:
 
     def rpm_info(self):
         assert self.arch
-        return koji_get_rpm(self)
+        return KojiRPMInfo.get(self)
 
     def build_info(self):
-        return koji_build_info(self)
+        return KojiBuildInfo.get(self)
 
     def add_output(self, rpm, build_id=None):
         assert self.package is None
@@ -208,8 +211,7 @@ class RPM:
         assert not self.package
 
         rinfo = self.rpm_info()
-        bid = rinfo['build_id']
-        binfo = koji_build_info(bid)
+        binfo = KojiBuildInfo.get(rinfo['build_id'])
         package = self.from_string(binfo['nvr'], epoch=binfo['epoch'])
         package.add_output(self)
 
@@ -231,54 +233,71 @@ class RPM:
                          self.arch,
                          f"{self.canonical}.rpm"))
 
-try:
-    _BUILD_INFO_CACHE  # pylint: disable=used-before-assignment
-except NameError:
-    _BUILD_INFO_CACHE = {}
+class DiskCache:
+    name = None
 
-def koji_build_info(ident):
-    if isinstance(ident, int):
-        key = ident
-    else:
-        key = ident.canonical
-        ident = ident.koji_id
-    if not (binfo := _BUILD_INFO_CACHE.get(key, None)):
-        print(f'call: getBuild({ident})')
-        binfo = SESSION.getBuild(ident, strict=True)
-        _BUILD_INFO_CACHE[binfo['id']] = _BUILD_INFO_CACHE[binfo['nvr']] = binfo
-    return binfo
-    # XXX: nvr vs. nevr
+    @classmethod
+    def get(cls, ident):
+        key = cls.identifier(ident)
 
-try:
-    _TASK_CHILDREN_CACHE  # pylint: disable=used-before-assignment
-except NameError:
-    _TASK_CHILDREN_CACHE = {}
+        path = cls.path(key)
+        try:
+            f = path.open('r')
+            return json.load(f)
+        except FileNotFoundError:
+            pass
 
-def koji_get_task_children(task_id):
-    if (tasks := _TASK_CHILDREN_CACHE.get(task_id, None)) is None:
-        print(f"call: getTaskChildren({task_id})")
-        tasks = SESSION.getTaskChildren(task_id)
-        _TASK_CHILDREN_CACHE[task_id] = tasks
-    return tasks
+        value = cls._get(key)
 
-try:
-    _TASK_OUTPUT_CACHE  # pylint: disable=used-before-assignment
-except NameError:
-    _TASK_OUTPUT_CACHE = {}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('w') as f:
+            json.dump(value, f)
+        return value
 
-def koji_list_task_output(task_id):
-    if (output := _TASK_OUTPUT_CACHE.get(task_id, None)) is None:
-        print(f"call: listTaskOutput({task_id})")
-        output = SESSION.listTaskOutput(task_id)
-        _TASK_OUTPUT_CACHE[task_id] = output
-    return output
+    @staticmethod
+    def identifier(key):
+        if isinstance(key, RPM):
+            return key.canonical
+        return key
 
-try:
-    _RPM_INFO_CACHE  # pylint: disable=used-before-assignment
-except NameError:
-    _RPM_INFO_CACHE = {}
+    @classmethod
+    def path(cls, key) -> Path:
+        return Path(f'cache/info/{cls.name}-{key}.txt')
 
-def koji_get_rpm(rpm):
+    @classmethod
+    def _get(cls, key):
+        raise NotImplementedError
+
+class KojiBuildInfo(DiskCache):
+    name = 'build-info'
+
+    @classmethod
+    def _get(cls, key):
+        print(f'call: getBuild({key})')
+        ans = SESSION.getBuild(key, strict=True)
+        return ans
+
+class KojiTaskChildren(DiskCache):
+    name = 'task-children'
+
+    @classmethod
+    def _get(cls, key):
+        print(f"call: getTaskChildren({key})")
+        tasks = SESSION.getTaskChildren(key)
+        return tasks
+
+class KojiTaskOutput(DiskCache):
+    name = 'task-output'
+
+    @classmethod
+    def _get(cls, key):
+        print(f"call: listTaskOutput({key})")
+        output = SESSION.listTaskOutput(key)
+        return output
+
+class KojiRPMInfo(DiskCache):
+    name = 'rpm-info'
+
     # It seems koji has no notion of epoch :(
     # Let's hope nobody ever builds the same n-v-r with different e
 
@@ -286,11 +305,11 @@ def koji_get_rpm(rpm):
     # - a map containing 'name', 'version', 'release', and 'arch'
     #   (and optionally 'location')
     # I have no idea what 'location' is.
-    if (rinfo := _RPM_INFO_CACHE.get(rpm.canonical, None)) is None:
-        print(f'call: getRPM({rpm.koji_id}')
-        rinfo = SESSION.getRPM(rpm.koji_id, strict=True)
-        _RPM_INFO_CACHE[rpm.canonical] = rinfo
-    return rinfo
+    @classmethod
+    def _get(cls, key):
+        print(f'call: getRPM({key!r})')
+        rinfo = SESSION.getRPM(key, strict=True)
+        return rinfo
 
 
 def koji_log_url(package, name, arch):
@@ -339,9 +358,15 @@ def get_buildroot_listing(buildroot_id):
     #    ...
     #  ]
 
-    return [RPM(name=e['name'], version=e['version'], release=e['release'], arch=e['arch'],
-                epoch=e['epoch'], build_id=e['build_id'])
+    rpms = [RPM(name=e['name'],
+                version=e['version'],
+                release=e['release'],
+                arch=e['arch'],
+                epoch=e['epoch'],
+                build_id=e['build_id'])
             for e in lst]
+    print(f'build root {buildroot_id} contains {len(rpms)} rpms')
+    return rpms
 
 def get_installed_rpms_from_log(package, arch):
     log = get_koji_log(package, 'root.log', arch)
@@ -564,7 +589,7 @@ def mock_collect_output(package, mock_configfile):
 
     return outputs
 
-def compare_output(rpm1, rpm2):
+def compare_output(rpm1, rpm2, file=None):
     # Let's first compare with rpmdiff. If rpmdiff is happy, the rpms
     # are substantially the same: the contents and important metadata
     # is the same.
@@ -576,7 +601,7 @@ def compare_output(rpm1, rpm2):
 
     cmd = ['rpmdiff', rpm1.local_filename(), rpm2]
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
-    c = subprocess.call(cmd)
+    c = subprocess.getstatusoutput(cmd)
     if c == 0:
         return
 
@@ -615,7 +640,7 @@ def rebuild_package(package, *mock_opts, arch=None):
     arch_possibles = [arch] if arch else ['noarch', platform.machine()]
 
     build = package.build_info()
-    tasks = koji_get_task_children(build['task_id'])
+    tasks = KojiTaskChildren.get(build['task_id'])
 
     # get a list of outputs:
     # for a noarch build:
@@ -669,7 +694,8 @@ def rebuild_package(package, *mock_opts, arch=None):
             (subtask['method'] == 'buildArch' and
              subtask['arch'] in arch_possibles)):
 
-            outputs = koji_list_task_output(subtask['id'])
+            outputs = KojiTaskOutput.get(subtask['id'])
+            print(f'{outputs=}')
 
             for output in outputs:
                 if output.endswith('.rpm'):
