@@ -54,6 +54,8 @@ def init_koji_session(opts):
 def do_opts(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--koji-profile', default='koji')
+    parser.add_argument('--mock-uniqueext', default='repro',
+                        help="Mock build identifier, e.g. 'builder1' or '{p.canonical}'")
 
     parser.add_argument('rpm')
 
@@ -639,11 +641,18 @@ def extract_srpm_name(rpm):
     assert field.endswith('.src.rpm')
     return RPM.from_string(field[:-4])
 
-def mock_uniqueext_arg(package):
-    return '--uniqueext=repro'
-    # return f'--uniqueext={package.canonical}'
+def format_string(string: str, **environ: dict):
+    try:
+        return string.format(**environ)
+    except (KeyError, AttributeError) as e:
+        msg = f'string formatting failed: {e}\n[{string}]\n[{pprint.pformat(environ)}]'
+        raise ValueError(msg)
 
-def build_package(rpm, mock_configfile, *mock_opts):
+def mock_uniqueext_arg(opts, package) -> list[str]:
+    ext = format_string(opts.mock_uniqueext, p=package)
+    return [f'--uniqueext={ext}'] if ext else []
+
+def build_package(opts, rpm, mock_configfile, *mock_opts):
     rpm_file = rpm.local_filename()
     config = extract_config(rpm_file)
     srpm_file = rpm.package.srpm.local_filename()
@@ -651,7 +660,7 @@ def build_package(rpm, mock_configfile, *mock_opts):
     cmd = [
         'mock',
         '-r', mock_configfile,
-        mock_uniqueext_arg(rpm.package),
+        *mock_uniqueext_arg(opts, rpm.package),
         f"--define=_buildhost {config['BUILDHOST']}",
         f"--define=distribution {config['DISTRIBUTION']}",
         f"--define=packager {config['PACKAGER']}",
@@ -666,11 +675,11 @@ def build_package(rpm, mock_configfile, *mock_opts):
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
     subprocess.check_call(cmd)
 
-def mock_collect_output(package, mock_configfile):
+def mock_collect_output(opts, package, mock_configfile):
     cmd = [
         'mock',
         '-r', mock_configfile,
-        mock_uniqueext_arg(package),
+        *mock_uniqueext_arg(opts, package),
         '--print-root-path',
     ]
 
@@ -748,7 +757,7 @@ def compare_outputs(package, outputs):
     return rpm_diffs
 
 
-def rebuild_package(package, *mock_opts, arch=None):
+def rebuild_package(opts, package, *mock_opts, arch=None):
     arch_possibles = [arch] if arch else [platform.machine(), 'noarch']
 
     build = package.build_info()
@@ -765,9 +774,9 @@ def rebuild_package(package, *mock_opts, arch=None):
 
     mock_configfile = setup_buildroot(arch_rpm)
 
-    build_package(arch_rpm, mock_configfile, *mock_opts)
+    build_package(opts, arch_rpm, mock_configfile, *mock_opts)
 
-    outputs = mock_collect_output(package, mock_configfile)
+    outputs = mock_collect_output(opts, package, mock_configfile)
     rpm_diffs = compare_outputs(package, outputs)
 
     path = arch_rpm.package.build_dir() / 'rebuild/comparison.json'
@@ -782,7 +791,7 @@ def main(argv):
     if package.arch:
         sys.exit('Sorry, specify build name, not rpm name')
 
-    rebuild_package(package)
+    rebuild_package(opts, package)
 
 if __name__ == '__main__':
     main(sys.argv[1:])
