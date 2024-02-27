@@ -100,6 +100,7 @@ class RPM:
     release: str
     epoch: int = None
     arch: str = None
+    arch_override: bool = False
 
     package: 'RPM' = None
     build_id: int = None
@@ -173,14 +174,15 @@ class RPM:
         return (f'{self.name}-{self.version}-{self.release}' +
                 (f'.{self.arch}' if self.arch else ''))
 
-    def with_arch(self, arch):
+    def with_arch(self, arch, tag=False):
         if self.arch == arch:
             return self
         return self.__class__(name=self.name,
                               version=self.version,
                               release=self.release,
                               epoch=self.epoch,
-                              arch=arch)
+                              arch=arch,
+                              arch_override=tag)
 
     @functools.cached_property
     def without_arch(self):
@@ -457,8 +459,19 @@ def get_installed_rpms_from_log(package, arch):
     log = get_koji_log(package, 'root.log', arch)
     return extract_log_installed_rpms(log)
 
+@listify
 def get_local_rpms(rpms):
-    return [rpm.local_filename() for rpm in rpms]
+    for rpm in rpms:
+        try:
+            yield rpm.local_filename()
+        # there's apparently koji.GenericError and __koji__koji.GenericError, wtf?
+        except Exception as e:
+            print('Failed to acquire local rpm:', e)
+            if rpm.arch_override and 'No such rpm' in str(e):
+                print(f'Skipping {rpm.canonical} after arch override')
+            else:
+                raise
+
 
 main_config = '''\
         [main]
@@ -549,7 +562,7 @@ def override_rpm_architecture(rpms):
             if not warned:
                 print(f"Overriding build arch of rpms from {rpm.arch} to {our_arch}")
                 warned = True
-            yield rpm.with_arch(our_arch)
+            yield rpm.with_arch(our_arch, tag=True)
         else:
             yield rpm
 
@@ -706,13 +719,15 @@ def compare_outputs(package, outputs):
     if not rpms:
         raise ValueError('No rpms found')
 
-    if len(rpms) != len(package.rpms):
-        raise ValueError(f'Mismatch in rpm count ({len(rpms)} != {len(package.rpms)})')
+    relevant_rpms = [rpm for rpm in package.rpms
+                     if rpm.arch in ('src', 'noarch', platform.machine())]
+    if len(rpms) != len(relevant_rpms):
+        raise ValueError(f'Mismatch in rpm count ({len(rpms)} != {len(relevant_rpms)})')
 
     compare_output(package.srpm, srpm)
 
     rpms_new = sorted(rpms)
-    rpms_old = sorted(package.rpms, key=lambda r: r.canonical)
+    rpms_old = sorted(relevant_rpms, key=lambda r: r.canonical)
 
     for rpm_old, rpm_new in zip(rpms_old, rpms_new):
         compare_output(rpm_old, rpm_new)
