@@ -110,6 +110,9 @@ class RPM:
     rpms: dict = dataclasses.field(default_factory=list)
     srpm: 'RPM' = None
 
+    def __repr__(self):
+        return f"RPM({self.name}-{self.version}-{self.release}{'.' if self.arch else ''}{self.arch or ''})"
+
     @classmethod
     def from_string(cls, s, epoch=None):
         # 'valgrind-1:3.21.0-8.fc39.x86_64'
