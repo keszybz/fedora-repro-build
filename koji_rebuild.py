@@ -254,6 +254,16 @@ class RPM:
                          self.arch,
                          f"{self.canonical}.rpm"))
 
+    @property
+    def fedora_version(self):
+        # Guess the Fedora version from the package release tag.
+        # This of course only works if the release tag is present and in a fairly
+        # standard form (e.g. shim doesn't have it). Maybe there's a better way…
+        if not (m := re.search(r'\.fc(\d\d)(?!\d)', self.release)):
+            raise ValueError(f'No see .fcNN in {self.release!r}')
+        return int(m.group(1))
+
+
 class DiskCache:
     name = None
 
@@ -500,14 +510,14 @@ main_config = '''\
         {%- endmacro %}
         '''
 
-def mock_config(arch, package_dir):
+def mock_config(fedora_version, arch, package_dir):
     assert arch != 'src'
     if arch in {'noarch', None}:
         arch = platform.machine()
 
     return textwrap.dedent(
         f'''\
-        include('fedora-rawhide-{arch}.cfg')
+        include('fedora-{fedora_version}-{arch}.cfg')
 
         config_opts['use_bootstrap'] = False
 
@@ -598,7 +608,7 @@ def setup_buildroot(task_rpm):
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
     subprocess.check_call(cmd)
 
-    config = mock_config(None, repo_dir)
+    config = mock_config(task_rpm.package.fedora_version, None, repo_dir)
     configfile = task_rpm.package.build_dir() / 'mock.cfg'
     configfile.write_text(config)
 
