@@ -696,10 +696,12 @@ def compare_output(rpm1, rpm2, file=None):
 
     cmd = ['rpmdiff', rpm1.local_filename(), rpm2]
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
-    c = subprocess.getstatusoutput(cmd)
-    if c == 0:
-        return
+    status = subprocess.run(cmd, capture_output=True, text=True)
+    if status == 0:
+        return None
 
+    print(status.stdout)
+    return status.stdout
     # TBD
 
 def compare_outputs(package, outputs):
@@ -724,13 +726,16 @@ def compare_outputs(package, outputs):
     if len(rpms) != len(relevant_rpms):
         raise ValueError(f'Mismatch in rpm count ({len(rpms)} != {len(relevant_rpms)})')
 
-    compare_output(package.srpm, srpm)
-
     rpms_new = sorted(rpms)
     rpms_old = sorted(relevant_rpms, key=lambda r: r.canonical)
 
+    rpm_diffs = {}
+    rpm_diffs[package.srpm.canonical] = compare_output(package.srpm, srpm)
+
     for rpm_old, rpm_new in zip(rpms_old, rpms_new):
-        compare_output(rpm_old, rpm_new)
+        rpm_diffs[rpm_old.canonical] = compare_output(rpm_old, rpm_new)
+
+    return rpm_diffs
 
 
 def rebuild_package(package, *mock_opts, arch=None):
@@ -753,8 +758,11 @@ def rebuild_package(package, *mock_opts, arch=None):
     build_package(arch_rpm, mock_configfile, *mock_opts)
 
     outputs = mock_collect_output(package, mock_configfile)
-    compare_outputs(package, outputs)
+    rpm_diffs = compare_outputs(package, outputs)
 
+    path = arch_rpm.package.build_dir() / 'rebuild/comparison.json'
+    with path.open('w') as f:
+        json.dump(rpm_diffs, f)
 
 def main(argv):
     opts = do_opts(argv)
