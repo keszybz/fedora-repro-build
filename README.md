@@ -30,6 +30,7 @@ At least the following fields will always or almost always vary:
 * `SHA256HEADER`
 * `BUILDTIME`
 * `BUILDHOST` (we override this based on the first archful package, but srpm and noarch packages will often have different values)
+* `COOKIE` (this is a combination of `BUILDHOST` and `BUILDTIME`)
 * `OPTFLAGS` (this depends on the architecture, also for the srpm and noarch packages)
 * `PLATFORM` (same)
 
