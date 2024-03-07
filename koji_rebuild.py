@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 # https://kojipkgs.fedoraproject.org//packages/systemd/254/1.fc39/data/logs/x86_64/root.log
 # pylint: disable=missing-docstring,invalid-name,consider-using-with,unspecified-encoding
