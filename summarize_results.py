@@ -6,11 +6,14 @@ import functools
 import json
 import re
 import sys
+import textwrap
 from pathlib import Path
 from pprint import pprint
 
 @dataclasses.dataclass
 class State:
+    # This one counts by individual differences reported by rpmdiff
+
     rpmname: str
 
     src_metadata: int = 0
@@ -49,6 +52,124 @@ class State:
             items = getattr(self, attr)
             for item in items:
                 print(f"        {' '.join(item)}")
+
+    def no_diff(self):
+        return self == State(self.rpmname)
+    def only_src_metadata(self):
+        return self == State(self.rpmname, src_metadata=self.src_metadata)
+    def serious(self):
+        return (self.rpm_metadata or
+                self.payload_paths or
+                self.payload_mods or
+                self.unknown)
+
+
+@dataclasses.dataclass
+class Summary:
+    # Count by builds
+    builds: int = 0
+    build_no_diff: int = 0
+    build_only_src_metadata: int = 0
+    build_some_diff: int = 0
+
+    # Count by packages
+    srpms: int = 0
+    rpms: int = 0
+
+    no_diff: int = 0
+    only_src_metadata: int = 0
+    some_diff: int = 0
+
+    src_metadata: int = 0
+    static_library: int = 0
+    jar_library: int = 0
+    mingw_binary: int = 0
+    debuginfo_metadata: int = 0
+    debuginfo_hash: int = 0
+    javadoc_html: int = 0
+    doc_pdf: int = 0
+    rpm_metadata: int = 0
+    payload_paths: int = 0
+    payload_mods: int = 0
+
+    unknown: int = 0
+
+    def add(self, data: dict[str, State]):
+        # This part is for the whole build
+        self.builds += 1
+        if all(rpmdiff.no_diff() for rpmdiff in data.values()):
+            self.build_no_diff += 1
+        elif all(rpmdiff.only_src_metadata() for rpmdiff in data.values()):
+            self.build_only_src_metadata += 1
+        else:
+            self.build_some_diff += 1
+
+        for name, rpmdiff in data.items():
+            is_srpm = name.endswith('.src')
+            if is_srpm:
+                self.srpms += 1
+            else:
+                self.rpms += 1
+
+            if rpmdiff.no_diff():
+                self.no_diff += 1
+            elif rpmdiff.only_src_metadata():
+                self.only_src_metadata += 1
+            else:
+                self.some_diff += 1
+
+            for attr in ('src_metadata',
+                         'static_library',
+                         'jar_library',
+                         'mingw_binary',
+                         'debuginfo_metadata',
+                         'debuginfo_hash',
+                         'javadoc_html',
+                         'doc_pdf',
+                         'rpm_metadata',
+                         'payload_paths',
+                         'payload_mods',
+                         'unknown'):
+                val = getattr(rpmdiff, attr)
+                setattr(self, attr, getattr(self, attr) + bool(val))
+
+    def report(self):
+        assert self.srpms == self.builds
+        assert self.rpms >= self.builds
+        assert self.build_no_diff + self.build_only_src_metadata + self.build_some_diff == self.builds
+
+        total = self.srpms + self.rpms
+
+        print(textwrap.dedent(f'''\
+        #################### SUMMARY ####################
+        total builds: {self.builds}
+        reproducible: {self.build_no_diff} ({self.build_no_diff / self.builds:.0%})
+        only src metadata: {self.build_only_src_metadata}  ({self.build_only_src_metadata / self.builds:.0%})
+        irreproducible: {self.build_some_diff} ({self.build_some_diff / self.builds:.0%})
+
+        by rpm:
+          total rpms: {total}
+          src, non-src: {self.srpms} ({self.srpms/total:.0%}), {self.rpms} ({self.rpms/total:.0%})
+          reproducible: {self.no_diff} ({self.no_diff / total:.0%})
+          only src metadata: {self.only_src_metadata}  ({self.only_src_metadata / total:.0%})
+          irreproducible: {self.some_diff} ({self.some_diff / total:.0%})
+
+          rpms with irreproducibility:'''))
+
+        for attr in ('src_metadata',
+                     'static_library',
+                     'jar_library',
+                     'mingw_binary',
+                     'debuginfo_metadata',
+                     'debuginfo_hash',
+                     'javadoc_html',
+                     'doc_pdf',
+                     'rpm_metadata',
+                     'payload_paths',
+                     'payload_mods',
+                     'unknown'):
+            val = getattr(self, attr)
+            print(f"    {attr}: {val}")
 
 def parse_rpmdiff(rpmname, diff):
     state = State(rpmname)
@@ -132,11 +253,22 @@ def read_input(filename):
     return data2
 
 if __name__ == '__main__':
-    for filename in sys.argv[1:]:
+    summary = Summary()
+
+    args = sys.argv[1:]
+    quiet = args[0] == '-q'
+    if quiet:
+        args.pop(0)
+
+    for filename in args:
         p = Path(filename)
         data = read_input(p)
 
-        print(f'#################### {filename} ####################')
+        if not quiet:
+            print(f'#################### {filename} ####################')
+            for rpmdiff in data.values():
+                rpmdiff.report()
+	
+        summary.add(data)
 
-        for diff in data.values():
-            diff.report()
+    summary.report()
