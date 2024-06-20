@@ -51,6 +51,9 @@ def init_koji_session(opts):
     if not SESSION:
         KOJI = koji.get_profile_module(opts.koji_profile)
         session_opts = KOJI.grab_session_options(KOJI.config)
+        session_opts['debug'] = opts.debug
+        session_opts['debug_xmlrpc'] = opts.debug_xmlrpc
+        # pprint.pprint(session_opts)
         SESSION = KOJI.ClientSession(KOJI.config.server, session_opts)
 
 def do_opts(argv=None):
@@ -58,6 +61,10 @@ def do_opts(argv=None):
     parser.add_argument('--koji-profile', default='koji')
     parser.add_argument('--mock-uniqueext', default='repro',
                         help="Mock build identifier, e.g. 'builder1' or '{p.canonical}'")
+    parser.add_argument('--debug',
+                        action='store_true')
+    parser.add_argument('--debug-xmlrpc',
+                        action='store_true')
 
     parser.add_argument('rpm')
 
