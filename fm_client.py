@@ -105,7 +105,7 @@ def do_opts(argv=None):
     parser.add_argument('--queue',
                         default='rebuild')
     parser.add_argument('--pattern',
-                        default='*.fc41')
+                        default='*.fc41*')
 
     opts = parser.parse_args(argv)
     return opts
