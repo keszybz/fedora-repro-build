@@ -5,10 +5,8 @@
 # pylint: disable=missing-docstring,invalid-name,consider-using-with,unspecified-encoding
 
 import argparse
-import collections
 import dataclasses
 import json
-import fnmatch
 import functools
 import platform
 import pprint
@@ -19,7 +17,6 @@ import subprocess
 import sys
 import textwrap
 import time
-import typing
 from pathlib import Path
 
 import requests

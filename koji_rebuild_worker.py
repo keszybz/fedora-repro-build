@@ -5,11 +5,8 @@
 
 import argparse
 import dataclasses
-import subprocess
 import random
-import time
 import sys
-from pathlib import Path
 
 import koji
 from ipcqueue import posixmq
