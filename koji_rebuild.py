@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 import typing
 from pathlib import Path
 
@@ -402,9 +403,19 @@ class KojiBuildRPMs(DiskCache):
 
     @classmethod
     def _get(cls, key):
-        print(f"call: listBuildRPMs({key})")
-        output = SESSION.listBuildRPMs(key)
-        return output
+        for attempt in range(3):
+            print(f"call: listBuildRPMs({key})")
+            output = SESSION.listBuildRPMs(key)
+
+            # Sometimes we get an empty list. Let's try again.
+            if output:
+                return output
+
+            print('Got empty output, retrying!!!')
+            time.sleep(1)
+        else:
+            raise IOError("Getting empty reply for listBuildRPMs({key})")
+
 
 class KojiRPMInfo(DiskCache):
     name = 'rpm-info'
