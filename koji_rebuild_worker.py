@@ -92,12 +92,11 @@ def main(argv):
 
             print(f'Will rebuild {package}')
 
-            try:
-                koji_rebuild.rebuild_package(opts, package)
-            except subprocess.CalledProcessError as e:
-                queues.results.put(f'FAILURE {package}: {e}')
-            else:
+            mock_result = koji_rebuild.rebuild_package(opts, package)
+            if mock_result == 0:
                 queues.results.put(f'SUCCESS {package}')
+            else:
+                queues.results.put(f'FAILURE {package}: {mock_result=}')
 
     else:
         builds = koji_rebuild.SESSION.listBuilds(

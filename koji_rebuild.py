@@ -706,9 +706,10 @@ def build_package(opts, rpm, mock_configfile, *mock_opts):
     ]
 
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
-    subprocess.check_call(cmd)
+    c = subprocess.run(cmd)
+    return c.returncode
 
-def mock_collect_output(opts, package, mock_configfile):
+def mock_collect_output(opts, package, mock_configfile, mock_result):
     cmd = [
         'mock',
         '-r', mock_configfile,
@@ -731,6 +732,10 @@ def mock_collect_output(opts, package, mock_configfile):
     for file in result.glob('*'):
         print(f'Squirelling mock output {file.name}')
         shutil.copyfile(file, outdir / file.name, follow_symlinks=False)
+
+    if mock_result != 0:
+        print('Marking rebuild as failed')
+        (outdir / 'FAILED').write_text(f'{mock_result=}\n')
 
 def compare_output(rpm1, rpm2, file=None):
     # Let's first compare with rpmdiff. If rpmdiff is happy, the rpms
@@ -847,11 +852,13 @@ def rebuild_package(opts, package, *mock_opts, arch=None):
 
     mock_configfile = setup_buildroot(arch_rpm)
 
-    build_package(opts, arch_rpm, mock_configfile, *mock_opts)
+    mock_result = build_package(opts, arch_rpm, mock_configfile, *mock_opts)
+    mock_collect_output(opts, package, mock_configfile, mock_result)
 
-    mock_collect_output(opts, package, mock_configfile)
+    if mock_result == 0:
+        compare_outputs(package, save=True)
 
-    compare_outputs(package, save=True)
+    return mock_result
 
 def compare_package(opts, package):
     build = package.build_info()
@@ -870,7 +877,7 @@ def main(argv):
 
     if rpm.arch:
         sys.exit('Sorry, specify build name, not rpm name')
-    rebuild_package(opts, rpm)
+    sys.exit(rebuild_package(opts, rpm))
 
 if __name__ == '__main__':
     main(sys.argv[1:])
