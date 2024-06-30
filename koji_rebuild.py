@@ -703,6 +703,13 @@ def build_package(opts, rpm, mock_configfile, *mock_opts):
     c = subprocess.run(cmd)
     return c.returncode
 
+def create_empty_outdir(package):
+    outdir = package.build_dir() / 'rebuild'
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    outdir.mkdir()
+    return outdir
+
 def mock_collect_output(opts, package, mock_configfile, mock_result):
     cmd = [
         'mock',
@@ -718,18 +725,13 @@ def mock_collect_output(opts, package, mock_configfile, mock_result):
     result = root / '../result'
     assert result.exists()
 
-    outdir = package.build_dir() / 'rebuild'
-    if outdir.exists():
-        shutil.rmtree(outdir)
-    outdir.mkdir()
+    outdir = create_empty_outdir()
 
     for file in result.glob('*'):
         print(f'Squirelling mock output {file.name}')
         shutil.copyfile(file, outdir / file.name, follow_symlinks=False)
 
-    if mock_result != 0:
-        print('Marking rebuild as failed')
-        (outdir / 'FAILED').write_text(f'{mock_result=}\n')
+    return outdir
 
 def compare_output(rpm1, rpm2, file=None):
     # Let's first compare with rpmdiff. If rpmdiff is happy, the rpms
@@ -838,6 +840,9 @@ def compare_outputs(package, save=False):
 
     return rpm_diffs
 
+class NoBuildForArch(ValueError):
+    pass
+
 def rebuild_package(opts, package, *mock_opts, arch=None):
     arch_possibles = [arch] if arch else [platform.machine(), 'noarch']
 
@@ -848,17 +853,26 @@ def rebuild_package(opts, package, *mock_opts, arch=None):
     arch_rpms = [rpm for rpm in package.rpms if rpm.arch in arch_possibles[:1]]
     if not arch_rpms:
         arch_rpms = [rpm for rpm in package.rpms if rpm.arch in arch_possibles[1:]]
-    if not arch_rpms:
-        raise ValueError(f"Cannot find rpm with arch={' or '.join(arch_possibles)}")
-    arch_rpm = arch_rpms[0]
+    if arch_rpms:
+        arch_rpm = arch_rpms[0]
 
-    mock_configfile = setup_buildroot(arch_rpm)
+        mock_configfile = setup_buildroot(arch_rpm)
 
-    mock_result = build_package(opts, arch_rpm, mock_configfile, *mock_opts)
-    mock_collect_output(opts, package, mock_configfile, mock_result)
+        mock_result = build_package(opts, arch_rpm, mock_configfile, *mock_opts)
+        outdir = mock_collect_output(opts, package, mock_configfile, mock_result)
 
-    if mock_result == 0:
-        compare_outputs(package, save=True)
+        if mock_result == 0:
+            compare_outputs(package, save=True)
+
+        result = f"Mock result {mock_result}"
+    else:
+        outdir = create_empty_outdir()
+        mock_result = None
+        result = f"Cannot find rpm with arch={' or '.join(arch_possibles)}"
+
+    if mock_result != 0:
+        print(f'{package.canonical}: marking rebuild as failed: {result}')
+        (outdir / 'FAILED').write_text(result + '\n')
 
     return mock_result
 
