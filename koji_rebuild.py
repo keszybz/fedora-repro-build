@@ -8,6 +8,7 @@ import argparse
 import collections
 import dataclasses
 import json
+import fnmatch
 import functools
 import platform
 import pprint
@@ -807,8 +808,16 @@ def compare_outputs(package, save=False):
     # Our build will only recreate one variant, so we need to ignore
     # the others. Unfortunately, there is just a naming convention,
     # no obvious way to figure out which rpms are not expected.
-    known_foreignarch = ('sysroot',
-                         'glibc-headers')
+    known_foreignarch = (
+        # glibc:
+        'sysroot-',
+        'glibc-headers-',
+        # s390utils
+        's390utils-',
+        # kernel
+        'kernel-uki-',   # those are only built for some architectures
+        'kernel-debug-uki-',
+    )
 
     for rpmname in rpms_old:
         good = rpmname.startswith(known_foreignarch)
