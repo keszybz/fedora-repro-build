@@ -84,9 +84,7 @@ def main(argv):
 
             assert not package.arch
             if rebuild_exists(package):
-                # I don't understand what's going on here.
-                # Did I forget to drain the queue before a restart?
-                print(f'WARNING: {package.canonical} already built')
+                print(f'{package.canonical} already built')
                 queues.results.put(f'FAILURE {package}: found on disk')
                 continue
 
