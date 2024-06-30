@@ -78,11 +78,17 @@ def main(argv):
 
     elif opts.worker:
         while True:
+            print('Getting job...', end=' ')
             package = queues.jobs.get()
-            print(f'Got {package}')
+            print(f'{package}')
 
             assert not package.arch
-            assert not rebuild_exists(package)
+            if rebuild_exists(package):
+                # I don't understand what's going on here.
+                # Did I forget to drain the queue before a restart?
+                print(f'WARNING: {package.canonical} already built')
+                queues.results.put(f'FAILURE {package}: found on disk')
+                continue
 
             print(f'Will rebuild {package}')
 
@@ -99,23 +105,27 @@ def main(argv):
             createdAfter=opts.after,
             pattern=opts.pattern)
 
+        packages = [
+            koji_rebuild.RPM(name=build['name'],
+                             version=build['version'],
+                             release=build['release'])
+            for build in builds]
+
+        todo = []
+        for package in packages:
+            if rebuild_exists(package):
+                print(f'{package.canonical} already rebuilt, ignoring')
+            else:
+                todo += [package]
+
         # Randomize the list in case the list consists of a long repetition
         # of builds of the same type, which makes load type distribution bad.
-        builds = sorted(builds, key=lambda x: random.random())
+        todo.sort(key=lambda x: random.random())
+        print(f'Have {len(todo)} builds to do ({len(packages)-len(todo)} already done)')
 
-        for build in builds:
-            package = koji_rebuild.RPM(name=build['name'],
-                                       version=build['version'],
-                                       release=build['release'])
-            assert package.canonical == build['nvr']
-
-            print(f"Got {build['nvr']} state={build['state']}...")
-
-            if rebuild_exists(package):
-                print('... found rebuild, ignoring')
-            else:
-                print('... storing in queue')
-                queues.jobs.put(package)
+        for package in todo:
+            print(f'{package.canonical} into the queue')
+            queues.jobs.put(package)
 
             while ret := queue_pop(queues.results):
                 print(f'Got {ret}')
