@@ -704,7 +704,7 @@ def create_empty_outdir(package):
     outdir = package.build_dir() / 'rebuild'
     if outdir.exists():
         shutil.rmtree(outdir)
-    outdir.mkdir()
+    outdir.mkdir(parents=True)
     return outdir
 
 def mock_collect_output(opts, package, mock_configfile, mock_result):
