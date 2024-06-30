@@ -722,7 +722,7 @@ def mock_collect_output(opts, package, mock_configfile, mock_result):
     result = root / '../result'
     assert result.exists()
 
-    outdir = create_empty_outdir()
+    outdir = create_empty_outdir(package)
 
     for file in result.glob('*'):
         print(f'Squirelling mock output {file.name}')
@@ -863,7 +863,7 @@ def rebuild_package(opts, package, *mock_opts, arch=None):
 
         result = f"Mock result {mock_result}"
     else:
-        outdir = create_empty_outdir()
+        outdir = create_empty_outdir(package)
         mock_result = None
         result = f"Cannot find rpm with arch={' or '.join(arch_possibles)}"
 
