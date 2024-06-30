@@ -535,6 +535,13 @@ def mock_config(fedora_version, arch, package_dir):
 
         config_opts['use_bootstrap'] = False
 
+        config_opts['plugin_conf']['tmpfs_enable'] = True
+        config_opts['plugin_conf']['tmpfs_opts'] = {{}}
+        config_opts['plugin_conf']['tmpfs_opts']['required_ram_mb'] = 1024
+        config_opts['plugin_conf']['tmpfs_opts']['max_fs_size'] = '30g'
+        config_opts['plugin_conf']['tmpfs_opts']['mode'] = '0755'
+        config_opts['plugin_conf']['tmpfs_opts']['keep_mounted'] = False
+
         config_opts['dnf.conf'] = """
         {main_config}
 
