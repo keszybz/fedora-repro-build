@@ -66,6 +66,8 @@ def do_opts(argv=None):
                         action='store_true')
     parser.add_argument('--debug-xmlrpc',
                         action='store_true')
+    parser.add_argument('-d', '--diff',
+                        action='store_true')
 
     parser.add_argument('rpm')
 
@@ -726,13 +728,9 @@ def mock_collect_output(opts, package, mock_configfile):
         shutil.rmtree(outdir)
     outdir.mkdir()
 
-    outputs = []
     for file in result.glob('*'):
         print(f'Squirelling mock output {file.name}')
         shutil.copyfile(file, outdir / file.name, follow_symlinks=False)
-        outputs += [outdir / file.name]
-
-    return outputs
 
 def compare_output(rpm1, rpm2, file=None):
     # Let's first compare with rpmdiff. If rpmdiff is happy, the rpms
@@ -754,7 +752,11 @@ def compare_output(rpm1, rpm2, file=None):
     return status.stdout
     # TBD
 
-def compare_outputs(package, outputs):
+def compare_outputs(package, save=False):
+    outdir = package.build_dir() / 'rebuild'
+    print(f'Looking for {outdir}/*.rpm…')
+    outputs = outdir.glob('*.rpm')
+
     srpm = None
     rpms = []
 
@@ -763,7 +765,7 @@ def compare_outputs(package, outputs):
             if srpm is not None:
                 raise ValueError('Duplicate srpm')
             srpm = output
-        elif output.name.endswith('.rpm'):
+        else:
             rpms += [output]
 
     if not srpm:
@@ -773,26 +775,66 @@ def compare_outputs(package, outputs):
 
     relevant_rpms = [rpm for rpm in package.rpms
                      if rpm.arch in ('src', 'noarch', platform.machine())]
+
     if len(rpms) != len(relevant_rpms):
-        raise ValueError(f'Mismatch in rpm count ({len(rpms)} != {len(relevant_rpms)})')
+        print(f'Mismatch in rpm count ({len(rpms)} != {len(relevant_rpms)})')
 
     rpms_new = sorted(rpms)
-    rpms_old = sorted(relevant_rpms, key=lambda r: r.canonical)
+    rpms_old = {r.canonical:r for r in relevant_rpms}
 
     rpm_diffs = {}
     rpm_diffs[package.srpm.canonical] = compare_output(package.srpm, srpm)
 
-    for rpm_old, rpm_new in zip(rpms_old, rpms_new):
-        rpm_diffs[rpm_old.canonical] = compare_output(rpm_old, rpm_new)
+    for rpm_new in rpms_new:
+        rpmname = rpm_new.name.removesuffix('.rpm')
+        if rpm_old := rpms_old.pop(rpmname, None):
+            res = compare_output(rpm_old, rpm_new)
+        else:
+            res = 'only found in rebuild'
+            print(f'{rpmname}: {res}')
+
+        rpm_diffs[rpmname] = res
+
+    # Some packages build noarch packages with archful code to allow
+    # foreign-arch code to be installed. For example, glibc builds
+    #   sysroot-x86_64-fc41-glibc.noarch
+    #   sysroot-i386-fc41-glibc.noarch
+    #   sysroot-aarch64-fc41-glibc.noarch
+    #   sysroot-ppc64le-fc41-glibc.noarch
+    #   sysroot-s390x-fc41-glibc.noarch
+    # and also
+    #   glibc-headers-s390.noarch
+    #   glibc-headers-x86.noarch
+    # Builds from different architectures in koji are combined.
+    # Our build will only recreate one variant, so we need to ignore
+    # the others. Unfortunately, there is just a naming convention,
+    # no obvious way to figure out which rpms are not expected.
+    known_foreignarch = ('sysroot',
+                         'glibc-headers')
+
+    for rpmname in rpms_old:
+        good = rpmname.startswith(known_foreignarch)
+        if good:
+            res = 'foreign-arch build only found in koji, ignoring'
+        else:
+            res = 'only found in koji build'
+
+        print(f'{rpmname}: {res}')
+        if not good:
+            rpm_diffs[rpmname] = res
+
+    if save:
+        savepath = package.build_dir() / 'rebuild/comparison.json'
+        print(f'Saving comparison to {savepath}')
+        with savepath.open('w') as f:
+            json.dump(rpm_diffs, f)
 
     return rpm_diffs
-
 
 def rebuild_package(opts, package, *mock_opts, arch=None):
     arch_possibles = [arch] if arch else [platform.machine(), 'noarch']
 
     build = package.build_info()
-
     rpm_list = KojiBuildRPMs.get(build['build_id'])
     package = RPM.from_koji_rpm_listing(rpm_list)
 
@@ -807,22 +849,28 @@ def rebuild_package(opts, package, *mock_opts, arch=None):
 
     build_package(opts, arch_rpm, mock_configfile, *mock_opts)
 
-    outputs = mock_collect_output(opts, package, mock_configfile)
-    rpm_diffs = compare_outputs(package, outputs)
+    mock_collect_output(opts, package, mock_configfile)
 
-    path = arch_rpm.package.build_dir() / 'rebuild/comparison.json'
-    with path.open('w') as f:
-        json.dump(rpm_diffs, f)
+    compare_outputs(package, save=True)
+
+def compare_package(opts, package):
+    build = package.build_info()
+    rpm_list = KojiBuildRPMs.get(build['build_id'])
+    package = RPM.from_koji_rpm_listing(rpm_list)
+    compare_outputs(package, save=True)
 
 def main(argv):
     opts = do_opts(argv)
+    rpm = RPM.from_string(opts.rpm)
+
     init_koji_session(opts)
 
-    package = RPM.from_string(opts.rpm)
-    if package.arch:
-        sys.exit('Sorry, specify build name, not rpm name')
+    if opts.diff:
+        return compare_package(opts, rpm)
 
-    rebuild_package(opts, package)
+    if rpm.arch:
+        sys.exit('Sorry, specify build name, not rpm name')
+    rebuild_package(opts, rpm)
 
 if __name__ == '__main__':
     main(sys.argv[1:])
