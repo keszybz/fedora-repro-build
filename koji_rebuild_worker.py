@@ -35,7 +35,7 @@ def do_opts(argv=None):
     parser.add_argument('--after',
                         default=None)
     parser.add_argument('--pattern',
-                        default='*.fc41')
+                        default='*.fc41*')
 
     opts = parser.parse_args(argv)
     return opts
