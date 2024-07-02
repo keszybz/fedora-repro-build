@@ -31,27 +31,23 @@ class State:
 
     unknown: list[str] = dataclasses.field(default_factory=list)
 
+    @classmethod
+    def fields(cls):
+        return [f for f in dataclasses.fields(cls)
+                if f.name != 'rpmname']
+
     def report(self):
         print(f'    {self.rpmname}')
-        for attr in ('src_metadata',
-                     'static_library',
-                     'jar_library',
-                     'mingw_binary',
-                     'debuginfo_metadata',
-                     'debuginfo_hash',
-                     'javadoc_html',
-                     'doc_pdf'):
-            val = getattr(self, attr)
-            if val > 0:
-                print(f"        {attr}{'×' if val > 1 else ''}{val if val > 1 else ''}")
-
-        for attr in ('rpm_metadata',
-                     'payload_paths',
-                     'payload_mods',
-                     'unknown'):
-            items = getattr(self, attr)
-            for item in items:
-                print(f"        {' '.join(item)}")
+        for field in self.fields():
+            attr = field.name
+            if field.type == int:
+                val = getattr(self, attr)
+                if val > 0:
+                    print(f"        {attr}{'×' if val > 1 else ''}{val if val > 1 else ''}")
+            else:
+                items = getattr(self, attr)
+                for item in items:
+                    print(f"        {' '.join(item)}")
 
     def no_diff(self):
         return self == State(self.rpmname)
@@ -118,18 +114,8 @@ class Summary:
             else:
                 self.some_diff += 1
 
-            for attr in ('src_metadata',
-                         'static_library',
-                         'jar_library',
-                         'mingw_binary',
-                         'debuginfo_metadata',
-                         'debuginfo_hash',
-                         'javadoc_html',
-                         'doc_pdf',
-                         'rpm_metadata',
-                         'payload_paths',
-                         'payload_mods',
-                         'unknown'):
+            for field in State.fields():
+                attr = field.name
                 val = getattr(rpmdiff, attr)
                 setattr(self, attr, getattr(self, attr) + bool(val))
 
@@ -156,20 +142,9 @@ class Summary:
 
           rpms with irreproducibility:'''))
 
-        for attr in ('src_metadata',
-                     'static_library',
-                     'jar_library',
-                     'mingw_binary',
-                     'debuginfo_metadata',
-                     'debuginfo_hash',
-                     'javadoc_html',
-                     'doc_pdf',
-                     'rpm_metadata',
-                     'payload_paths',
-                     'payload_mods',
-                     'unknown'):
-            val = getattr(self, attr)
-            print(f"    {attr}: {val}")
+        for field in State.fields():
+            val = getattr(self, field.name)
+            print(f"    {field.name}: {val}")
 
 def parse_rpmdiff(rpmname, diff):
     state = State(rpmname)
