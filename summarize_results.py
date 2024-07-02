@@ -24,6 +24,7 @@ class State:
     debuginfo_hash: int = 0
     javadoc_html: int = 0
     doc_pdf: int = 0
+    kernel_module: int = 0
 
     rpm_metadata: list[str] = dataclasses.field(default_factory=list)
     payload_paths: list[str] = dataclasses.field(default_factory=list)
@@ -84,6 +85,7 @@ class Summary:
     debuginfo_hash: int = 0
     javadoc_html: int = 0
     doc_pdf: int = 0
+    kernel_module: int = 0
     rpm_metadata: int = 0
     payload_paths: int = 0
     payload_mods: int = 0
@@ -195,6 +197,14 @@ def parse_rpmdiff(rpmname, diff):
                     state.static_library += 1
                 elif path.endswith(('.jar', '.war')):
                     state.jar_library += 1
+
+                # /lib/modules/6.10.0-0.rc4.20240618git14d7c92f8df9.39.fc41.x86_64/kernel/drivers/nfc/mei_phy.ko.xz
+                # /usr/libexec/kselftests/livepatch/test_modules/test_klp_atomic_replace.ko
+                elif re.match(r'/lib/modules/.*\.ko\.(gz|xz|zst)$', path):
+                    state.kernel_module += 1
+                elif re.match(r'/usr/libexec/kselftests/.*\.ko$', path):
+                    state.kernel_module += 1
+
                 # S.5........ /usr/share/maven-metadata/xmlunit-xmlunit-matchers.xml
                 # ..5........ /usr/share/maven-metadata/xmvn-connector-ivy.xml
                 # If the jar differs, the manifest will also differ, but not in size.
