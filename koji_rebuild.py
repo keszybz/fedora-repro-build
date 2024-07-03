@@ -656,8 +656,29 @@ def extract_config(filename):
                            'DISTRIBUTION',
                            'PACKAGER',
                            'VENDOR',
+                           'PLATFORM',
                            )}
     return config
+
+@functools.cache
+def rpm_host_value():
+    cmd = ['rpmbuild', '--eval', '%_host']
+    print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
+    v = subprocess.check_output(cmd, text=True).strip()
+    return v
+
+def koji_host_value(rpm_platform):
+    # Koji builds use %_host which has the -gnu suffix.
+    # I have no idea where this comes from, see
+    # https://bugzilla.redhat.com/show_bug.cgi?id=2295125.
+    #
+    # If the rpm has "-gnu" in PLATFORM and we don't have it in
+    # %_host, append it.
+    current = rpm_host_value()
+    if '-gnu' in rpm_platform and '-gnu' not in current:
+        return current + '-gnu'
+    else:
+        return current
 
 def extract_srpm_name(rpm):
     field = extract_header_field(rpm, 'SOURCERPM')
@@ -678,6 +699,7 @@ def mock_uniqueext_arg(opts, package) -> list[str]:
 def build_package(opts, rpm, mock_configfile, *mock_opts):
     rpm_file = rpm.local_filename()
     config = extract_config(rpm_file)
+    host_override = koji_host_value(config['PLATFORM'])
     srpm_file = rpm.package.srpm.local_filename()
 
     cmd = [
@@ -685,6 +707,7 @@ def build_package(opts, rpm, mock_configfile, *mock_opts):
         '-r', mock_configfile,
         *mock_uniqueext_arg(opts, rpm.package),
         f"--define=_buildhost {config['BUILDHOST']}",
+        f"--define=_host {host_override}",
         f"--define=distribution {config['DISTRIBUTION']}",
         f"--define=packager {config['PACKAGER']}",
         f"--define=vendor {config['VENDOR']}",
