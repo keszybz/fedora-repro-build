@@ -365,6 +365,15 @@ class KojiTaskOutput(DiskCache):
         output = SESSION.listTaskOutput(key)
         return output
 
+class KojiBuildroots(DiskCache):
+    name = 'buildroots'
+
+    @classmethod
+    def _get(cls, key):
+        print(f"call: listBuildroots({key})")
+        output = SESSION.listBuildroots(taskID=key)
+        return output
+
 class KojiBuildRPMs(DiskCache):
     name = 'build-rpms'
 
@@ -605,15 +614,21 @@ def override_rpm_architecture(rpms):
             yield rpm
 
 
-def setup_buildroot(task_rpm):
+def setup_buildroot(package, task):
     # XXX: buildroot_info['arch'] might be a foreign arch for a noarch build
 
-    build_rpms = get_buildroot_listing(task_rpm.buildroot_id)
+    buildroots = KojiBuildroots.get(task['id'])
+    if not buildroots:
+        print(f"{package.canonical}: no buildroot found for task {task['id']}")
+        return None
+    buildroot, = buildroots
+
+    build_rpms = get_buildroot_listing(buildroot['id'])
     build_rpms = override_rpm_architecture(build_rpms)
 
     rpms = get_local_rpms(build_rpms)
 
-    repo_dir = task_rpm.package.build_dir() / 'repo'
+    repo_dir = package.build_dir() / 'repo'
     repo_dir.mkdir(parents=True, exist_ok=True)
     for rpm in rpms:
         # Is there a way to make this less horrible in python?
@@ -636,8 +651,8 @@ def setup_buildroot(task_rpm):
     print(f"+ {' '.join(shlex.quote(str(s)) for s in cmd)}")
     subprocess.check_call(cmd)
 
-    config = mock_config(task_rpm.package.fedora_version, None, repo_dir)
-    configfile = task_rpm.package.build_dir() / 'mock.cfg'
+    config = mock_config(package.fedora_version, None, repo_dir)
+    configfile = package.build_dir() / 'mock.cfg'
     configfile.write_text(config)
 
     return configfile
@@ -866,21 +881,48 @@ def compare_outputs(package, save=False):
 class NoBuildForArch(ValueError):
     pass
 
+def find_right_task(opts, package, build, arch=None):
+    tasks = KojiTaskChildren.get(build['task_id'])
+    # First look for buildArch tasks on our architecture
+    # (an archful build or a noarch build and we are lucky)
+    matching_tasks = [task for task in tasks
+                      if task['arch'] == arch and task['method'] == 'buildArch']
+    if (n := len(matching_tasks)) > 1:
+        print(f'{package.canonical}: warning: found {n} buildArch tasks with arch {arch}')
+    if not matching_tasks:
+        # Now look for any buildArch task (a noarch build)
+        matching_tasks = [task for task in tasks if task['method'] == 'buildArch']
+        if (n := len(matching_tasks)) > 1:
+            # Possibly an archful build with no output for our architecture, this is
+            # unlikely to work.
+            print(f'{package.canonical}: warning: found {n} buildArch tasks with arch any')
+    if not matching_tasks:
+        return None
+    tasks = sorted(matching_tasks, key=lambda t: int(t['id']))
+    return tasks[0]  # earliest task
+
 def rebuild_package(opts, package, *mock_opts, arch=None):
-    arch_possibles = [arch] if arch else [platform.machine(), 'noarch']
+    arch = arch or platform.machine()
 
     build = package.build_info()
     rpm_list = KojiBuildRPMs.get(build['build_id'])
     package = RPM.from_koji_rpm_listing(rpm_list)
 
-    arch_rpms = [rpm for rpm in package.rpms if rpm.arch in arch_possibles[:1]]
-    if not arch_rpms:
-        arch_rpms = [rpm for rpm in package.rpms if rpm.arch in arch_possibles[1:]]
-    if arch_rpms:
-        arch_rpm = arch_rpms[0]
+    # Find a matching or a noarch rpm
+    if not (arch_rpm := ([rpm for rpm in package.rpms if rpm.arch == arch] or
+                         [rpm for rpm in package.rpms if rpm.arch == 'noarch'])[0]):
+        mock_result = None
+        result = f"Cannot find rpm with arch {arch} or noarch"
 
-        mock_configfile = setup_buildroot(arch_rpm)
+    elif not (task := find_right_task(opts, package, build, arch=arch)):
+        mock_result = None
+        result = "Could not find matching task"
 
+    elif not (mock_configfile := setup_buildroot(package, task)):
+        mock_result = None
+        result = "Could not set up buildroot"
+
+    else:
         mock_result = build_package(opts, arch_rpm, mock_configfile, *mock_opts)
         outdir = mock_collect_output(opts, package, mock_configfile, mock_result)
 
@@ -888,13 +930,10 @@ def rebuild_package(opts, package, *mock_opts, arch=None):
             compare_outputs(package, save=True)
 
         result = f"Mock result {mock_result}"
-    else:
-        outdir = create_empty_outdir(package)
-        mock_result = None
-        result = f"Cannot find rpm with arch={' or '.join(arch_possibles)}"
 
     if mock_result != 0:
         print(f'{package.canonical}: marking rebuild as failed: {result}')
+        outdir = create_empty_outdir(package)
         (outdir / 'FAILED').write_text(result + '\n')
 
     return mock_result
