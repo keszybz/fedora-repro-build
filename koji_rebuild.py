@@ -124,7 +124,7 @@ class RPM:
         return f"RPM({self.name}-{self.version}-{self.release}{'.' if self.arch else ''}{self.arch or ''})"
 
     @classmethod
-    def from_string(cls, s, epoch=None):
+    def from_string(cls, s, epoch=None, is_package=None):
         # 'valgrind-1:3.21.0-8.fc39.x86_64'
         parts = s.split('-')
         *nn, version, suffix = parts
@@ -150,6 +150,9 @@ class RPM:
                 release, arch = suffix, None
         else:
             release, arch = suffix, None
+
+        if is_package and arch:
+            raise ValueError('Got binrpm name not package name')
 
         return cls(name=name, version=version, release=release, epoch=ep, arch=arch)
 
@@ -904,15 +907,13 @@ def compare_package(opts, package):
 
 def main(argv):
     opts = do_opts(argv)
-    rpm = RPM.from_string(opts.rpm)
+    rpm = RPM.from_string(opts.rpm, is_package=True)
 
     init_koji_session(opts)
 
     if opts.diff:
         return compare_package(opts, rpm)
 
-    if rpm.arch:
-        sys.exit('Sorry, specify build name, not rpm name')
     sys.exit(rebuild_package(opts, rpm))
 
 if __name__ == '__main__':

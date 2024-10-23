@@ -33,6 +33,8 @@ def do_opts(argv=None):
                         default=None)
     parser.add_argument('--pattern',
                         default='*.fc41*')
+    parser.add_argument('builds',
+                        nargs='*')
 
     opts = parser.parse_args(argv)
     return opts
@@ -93,7 +95,7 @@ def main(argv):
             else:
                 queues.results.put(f'FAILURE {package}: {mock_result=}')
 
-    else:
+    elif opts.after:
         builds = koji_rebuild.SESSION.listBuilds(
             state=koji.BUILD_STATES['COMPLETE'],
             createdAfter=opts.after,
@@ -126,6 +128,14 @@ def main(argv):
 
         while ret := queues.results.get():
             print(f'Got {ret}')
+
+    else:
+        packages = [koji_rebuild.RPM.from_string(arg, is_package=True)
+                    for arg in opts.builds]
+        for package in packages:
+            print(f'{package.canonical} into the queue')
+            queues.jobs.put(package)
+
 
 if __name__ == '__main__':
     main(sys.argv[1:])
