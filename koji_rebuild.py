@@ -808,9 +808,9 @@ def compare_outputs(package, save=False):
             rpms += [output]
 
     if not srpm:
-        raise ValueError('No srpm found')
+        raise ValueError('No output srpm found')
     if not rpms:
-        raise ValueError('No rpms found')
+        print('Warning: no output rpms found')
 
     relevant_rpms = [rpm for rpm in package.rpms
                      if rpm.arch in ('src', 'noarch', platform.machine())]
