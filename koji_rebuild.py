@@ -8,6 +8,7 @@ import argparse
 import dataclasses
 import json
 import functools
+import os
 import platform
 import pprint
 import re
@@ -15,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -299,8 +301,12 @@ class DiskCache:
         value = cls._get(key)
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('w') as f:
-            json.dump(value, f)
+
+        tmp = tempfile.NamedTemporaryFile('wt', dir=path.parent, prefix=path.name)
+        json.dump(value, tmp)
+        tmp.flush()
+        os.rename(tmp.name, path.as_posix())
+
         return value
 
     @staticmethod
