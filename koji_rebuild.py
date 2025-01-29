@@ -915,8 +915,11 @@ def rebuild_package(opts, package, *mock_opts, arch=None):
     package = RPM.from_koji_rpm_listing(rpm_list)
 
     # Find a matching or a noarch rpm
-    if not (arch_rpm := ([rpm for rpm in package.rpms if rpm.arch == arch] or
-                         [rpm for rpm in package.rpms if rpm.arch == 'noarch'])[0]):
+    candidates = ([rpm for rpm in package.rpms if rpm.arch == arch] or
+                  [rpm for rpm in package.rpms if rpm.arch == 'noarch'])
+    arch_rpm = candidates[0] if candidates else None
+
+    if not arch_rpm:
         mock_result = None
         result = f"Cannot find rpm with arch {arch} or noarch"
 
