@@ -9,9 +9,18 @@ import os
 import sys
 from pathlib import Path
 
-CONF_FILENAME = 'fm_client.toml'
+CONF_FILENAME = 'koji_rebuild_listener.toml'
+
+def find_conf_file():
+    if (p := Path(sys.argv[0]).with_name(CONF_FILENAME)).exists():
+        return p.as_posix()
+    elif (p := Path('/etc/fedora-repro-build') / CONF_FILENAME).exists():
+        return p.as_posix()
+    else:
+        return f'/usr/lib/fedora-repro-build/{CONF_FILENAME}'
+
 # can this happen later?
-os.environ['FEDORA_MESSAGING_CONF'] = Path(sys.argv[0]).with_name(CONF_FILENAME).as_posix()
+os.environ['FEDORA_MESSAGING_CONF'] = find_conf_file()
 
 from fedora_messaging import api, config
 
